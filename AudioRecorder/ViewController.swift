@@ -107,6 +107,9 @@ class ViewController: NSViewController {
             return
         }
         
+        // pick the device with lower sample rate as the system will automatically down-sampling the audio for the other device
+        // while it doesn’t up-sampling if you choose a master device with higher sample rate.
+        // https://dev.to/yingzhong_xu_20d6f4c5d4ce/from-core-audio-to-llms-native-macos-audio-capture-for-ai-powered-tools-dkg
         guard let inputSampleRate = try? readDeviceSampleRate(for: inputID) else {
             print("failed to read input sample rate")
             return
