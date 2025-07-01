@@ -170,10 +170,11 @@ class ViewController: NSViewController {
         print("Using audio format: \(format)")
         
         // Configure audio file settings
+        let numOutputChannels = 2
         let settings: [String: Any] = [
             AVFormatIDKey: streamDescription.mFormatID,
             AVSampleRateKey: format.sampleRate,
-            AVNumberOfChannelsKey: format.channelCount
+            AVNumberOfChannelsKey: numOutputChannels
         ]
         
         // Generate unique filename based on current timestamp
@@ -190,17 +191,14 @@ class ViewController: NSViewController {
         
         // Create an I/O proc that writes audio data to our file
         let procErr = AudioDeviceCreateIOProcIDWithBlock(&deviceProcID, aggregateDeviceID, queue) { [weak self] inNow, inInputData, inInputTime, outOutputData, inOutputTime in
+            let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+            var monoBuffers: [AudioBuffer] = []
             
-            let ptr = UnsafeMutablePointer(mutating: inInputData)
-            let buffers = UnsafeMutableAudioBufferListPointer(ptr)
-            
-            var newBuf: AudioBuffer?
-            var resBuffers: [AudioBuffer] = []
-            
+            // Downmix buffers to mono
             for i in 0..<inInputData.pointee.mNumberBuffers {
                 let buf = buffers[Int(i)]
                 if buf.mNumberChannels == 1 {
-                    resBuffers.append(buf)
+                    monoBuffers.append(buf)
                     continue
                 }
                 // Convert to mono
@@ -208,8 +206,8 @@ class ViewController: NSViewController {
                 let numChannels = buf.mNumberChannels
                 let numFrames = buf.mDataByteSize / floatSize / numChannels
                 
-                let monoBuffer = UnsafeMutablePointer<Float32>.allocate(capacity: Int(numFrames))
-                monoBuffer.initialize(repeating: 0.0, count: Int(numFrames))
+                let monoBuff = UnsafeMutablePointer<Float32>.allocate(capacity: Int(numFrames))
+                monoBuff.initialize(repeating: 0.0, count: Int(numFrames))
                 
                 guard let data = buf.mData else {
                     continue
@@ -221,26 +219,30 @@ class ViewController: NSViewController {
                     for ch in 0..<numChannels {
                         sum += arr[Int(i * numChannels + ch)]
                     }
-                    monoBuffer[Int(i)] = sum / Float(numChannels)
+                    monoBuff[Int(i)] = sum / Float(numChannels)
                 }
-                newBuf = AudioBuffer(mNumberChannels: 1, mDataByteSize: numFrames * floatSize, mData: monoBuffer)
-                resBuffers.append(newBuf!)
+                monoBuffers.append(AudioBuffer(mNumberChannels: 1, mDataByteSize: numFrames * floatSize, mData: monoBuff))
             }
-            if let newBuf = newBuf {
-                let bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: newBuf)
-                withUnsafePointer(to: bufferList) { [weak self] buf in
-                    guard let self, let currentFile = self.currentFile else { return }
-                    do {
-                        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: buf, deallocator: nil) else {
-                            throw "Failed to create PCM buffer"
-                        }
-        
-                        try currentFile.write(from: buffer)
-                    } catch {
-                        print("Failed to write buffer to file: \(error)")
-                    }
+            let bufferCount = monoBuffers.count
+            assert(bufferCount == buffers.count, "downmixing from stereo to mono failed")
+            let bufferList = AudioBufferList.allocate(maximumBuffers: numOutputChannels)
+            bufferList[0] = monoBuffers[0]
+            bufferList[1] = monoBuffers[1]
+
+            guard let bufFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: format.sampleRate, channels: UInt32(numOutputChannels), interleaved: false) else {
+                print("failed to create buf format")
+                return
+            }
+
+            guard let self, let currentFile = self.currentFile else { return }
+            do {
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: bufFormat, bufferListNoCopy: bufferList.unsafePointer, deallocator: nil) else {
+                    throw "Failed to create PCM buffer"
                 }
 
+                try currentFile.write(from: buffer)
+            } catch {
+                print("Failed to write to file: \(error)")
             }
         }
 
