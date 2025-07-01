@@ -100,3 +100,84 @@ func readAudioTapStreamBasicDescription(for tapID: AudioObjectID) throws -> Audi
     
     return streamDescription
 }
+
+func readDefaultInputDevice() throws -> AudioDeviceID {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    var deviceID = kAudioObjectClassID
+    var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+
+    let err = AudioObjectGetPropertyData(
+        AudioObjectID(kAudioObjectSystemObject),
+        &address,
+        0,
+        nil,
+        &dataSize,
+        &deviceID
+    )
+
+    guard err == noErr else {
+        throw "Error reading default system input device: \(err)"
+    }
+
+    guard deviceID != kAudioObjectUnknown else {
+        throw "Invalid device ID returned"
+    }
+
+    return deviceID
+}
+
+func readDeviceStreamBasicDescription(for deviceID: AudioObjectID, scope: AudioObjectPropertyScope) throws -> AudioStreamBasicDescription {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyStreamFormat,
+        mScope: scope,
+        mElement: kAudioObjectPropertyElementMain
+    )
+
+    var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+    var streamDescription = AudioStreamBasicDescription()
+
+    let err = AudioObjectGetPropertyData(
+        deviceID,
+        &address,
+        0,
+        nil,
+        &dataSize,
+        &streamDescription
+    )
+
+    guard err == noErr else {
+        throw "Error reading device stream format: \(err)"
+    }
+
+    return streamDescription
+}
+
+func readDeviceSampleRate(for deviceID: AudioObjectID) throws -> Float64 {
+    var address = AudioObjectPropertyAddress(
+        mSelector: kAudioDevicePropertyNominalSampleRate,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    var dataSize: UInt32 = UInt32(MemoryLayout<Float64>.size)
+    var sampleRate: Float64 = 0
+    
+    let err = AudioObjectGetPropertyData(
+        deviceID,
+        &address,
+        0,
+        nil,
+        &dataSize,
+        &sampleRate
+    )
+    
+    guard err == noErr else {
+        throw "Error reading sample rate: \(err)"
+    }
+    return sampleRate
+}
+

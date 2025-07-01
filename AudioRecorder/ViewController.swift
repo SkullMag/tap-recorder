@@ -23,6 +23,7 @@ class ViewController: NSViewController {
     private var filePathField: NSTextField = NSTextField()
     
     private var currentFile: AVAudioFile?
+    private var permissionGranted = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -55,6 +56,12 @@ class ViewController: NSViewController {
     
     @objc
     func recordingButtonClicked(_ sender: NSButton) {
+        if !permissionGranted {
+            AVAudioApplication.requestRecordPermission { [weak self] granted in
+                self?.permissionGranted = granted
+            }
+            return
+        }
         isRecording ? stopRecording() : startRecording()
     }
     
@@ -89,6 +96,28 @@ class ViewController: NSViewController {
             print("failed to read device uid")
             return
         }
+        
+        guard let inputID = try? readDefaultInputDevice() else {
+            print("default input device")
+            return
+        }
+        
+        guard let inputUID = try? readDeviceUID(for: inputID) else {
+            print("failed to read dev uid")
+            return
+        }
+        
+        guard let inputSampleRate = try? readDeviceSampleRate(for: inputID) else {
+            print("failed to read input sample rate")
+            return
+        }
+        
+        guard let outputSampleRate = try? readDeviceSampleRate(for: systemOutputID) else {
+            print("failed to read input sample rate")
+            return
+        }
+        
+        let masterDeviceUID = inputSampleRate <= outputSampleRate ? inputUID : outputUID
 
         // Generate a unique ID for our aggregate device
         let aggregateUID = UUID().uuidString
@@ -97,13 +126,18 @@ class ViewController: NSViewController {
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Tap-global",
             kAudioAggregateDeviceUIDKey: aggregateUID,
-            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceMainSubDeviceKey: masterDeviceUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapAutoStartKey: false,
             kAudioAggregateDeviceSubDeviceListKey: [
                 [
-                    kAudioSubDeviceUIDKey: outputUID
+                    kAudioSubDeviceUIDKey: outputUID,
+                    kAudioSubDeviceDriftCompensationKey: true
+                ],
+                [
+                    kAudioSubDeviceUIDKey: inputUID,
+                    kAudioSubDeviceDriftCompensationKey: false
                 ]
             ],
             kAudioAggregateDeviceTapListKey: [
@@ -123,7 +157,7 @@ class ViewController: NSViewController {
         }
 
         // Get the audio format from the tap
-        guard var streamDescription = try? readAudioTapStreamBasicDescription(for: tapID) else {
+        guard var streamDescription = try? readDeviceStreamBasicDescription(for: aggregateDeviceID, scope: kAudioObjectPropertyScopeInput) else {
             print("Tap stream description not available.")
             return
         }
@@ -147,27 +181,69 @@ class ViewController: NSViewController {
         let fileURL = URL.applicationSupport.appendingPathComponent(filename, conformingTo: .wav)
         
         // Create the audio file for writing
-        guard let file = try? AVAudioFile(forWriting: fileURL, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: format.isInterleaved) else {
+        guard let file = try? AVAudioFile(forWriting: fileURL, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false) else {
             print("failed to create avaudiofile")
             return
         }
         currentFile = file
         print("Writing to \(fileURL.absoluteString)")
-        filePathField.stringValue = "Recording to: \(fileURL.path)"
-
+        
         // Create an I/O proc that writes audio data to our file
         let procErr = AudioDeviceCreateIOProcIDWithBlock(&deviceProcID, aggregateDeviceID, queue) { [weak self] inNow, inInputData, inInputTime, outOutputData, inOutputTime in
-            guard let self, let currentFile = self.currentFile else { return }
-            do {
-                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: inInputData, deallocator: nil) else {
-                    throw "Failed to create PCM buffer"
+            
+            let ptr = UnsafeMutablePointer(mutating: inInputData)
+            let buffers = UnsafeMutableAudioBufferListPointer(ptr)
+            
+            var newBuf: AudioBuffer?
+            var resBuffers: [AudioBuffer] = []
+            
+            for i in 0..<inInputData.pointee.mNumberBuffers {
+                let buf = buffers[Int(i)]
+                if buf.mNumberChannels == 1 {
+                    resBuffers.append(buf)
+                    continue
+                }
+                // Convert to mono
+                let floatSize = UInt32(MemoryLayout<Float32>.size)
+                let numChannels = buf.mNumberChannels
+                let numFrames = buf.mDataByteSize / floatSize / numChannels
+                
+                let monoBuffer = UnsafeMutablePointer<Float32>.allocate(capacity: Int(numFrames))
+                monoBuffer.initialize(repeating: 0.0, count: Int(numFrames))
+                
+                guard let data = buf.mData else {
+                    continue
                 }
                 
-                try currentFile.write(from: buffer)
-            } catch {
-                print("Failed to write buffer")
+                let arr = data.assumingMemoryBound(to: Float32.self)
+                for i in 0..<numFrames {
+                    var sum: Float32 = 0.0
+                    for ch in 0..<numChannels {
+                        sum += arr[Int(i * numChannels + ch)]
+                    }
+                    monoBuffer[Int(i)] = sum / Float(numChannels)
+                }
+                newBuf = AudioBuffer(mNumberChannels: 1, mDataByteSize: numFrames * floatSize, mData: monoBuffer)
+                resBuffers.append(newBuf!)
+            }
+            if let newBuf = newBuf {
+                let bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: newBuf)
+                withUnsafePointer(to: bufferList) { [weak self] buf in
+                    guard let self, let currentFile = self.currentFile else { return }
+                    do {
+                        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: buf, deallocator: nil) else {
+                            throw "Failed to create PCM buffer"
+                        }
+        
+                        try currentFile.write(from: buffer)
+                    } catch {
+                        print("Failed to write buffer to file: \(error)")
+                    }
+                }
+
             }
         }
+
 
         guard procErr == noErr else {
             print("Failed to create device I/O proc: \(err)")
